@@ -307,7 +307,8 @@ let state = {
   finishedProducts: new Set(),   // 已完成核保的产品
   diseaseQueue: [],  // 待问诊疾病队列
   deferredResults: null, // deferred阶段前已完成的产品结果
-  deferredProductIds: null // 待处理的deferred产品ID列表
+  deferredProductIds: null, // 待处理的deferred产品ID列表
+  questionAnswerMap: {} // 记录已问过的问题和回答，用于跨产品复用
 };
 
 // --- 疾病关键词映射 ---
@@ -351,7 +352,7 @@ const DISEASE_KEYWORDS = {
   '传导阻滞': ['传导阻滞', '束支传导阻滞', '房室传导阻滞'],
   '预激综合征': ['预激综合征', 'WPW'],
   '心脏起搏器': ['心脏起搏器', '起搏器'],
-  '瓣膜异常': ['瓣膜异常', '二尖瓣', '三尖瓣', '主动脉瓣', '肺动脉瓣', '瓣膜反流', '瓣膜关闭不全'],
+  '瓣膜异常': ['瓣膜异常', '二尖瓣', '三尖瓣', '主动脉瓣', '肺动脉瓣', '瓣膜反流', '瓣膜关闭不全', '二尖瓣反流', '三尖瓣反流', '二尖瓣关闭不全', '三尖瓣关闭不全'],
   '川崎病': ['川崎病'],
   '心肌炎': ['心肌炎'],
   '动脉瘤': ['动脉瘤', '主动脉瘤', '动脉夹层'],
@@ -1068,6 +1069,40 @@ const CHAOMA13_TREE = {
       }
     }]
   },
+  '卵圆孔未闭': {
+    questions: [{
+      q: '请问被保人的卵圆孔未闭情况？是否已自行闭合，且无其他并发症或后遗症？',
+      options: ['是，已自行闭合且无并发症', '否，未闭合'],
+      branches: {
+        '是，已自行闭合且无并发症': { result: '标准体' },
+        '否，未闭合': {
+          q: '是否已行手术治疗？',
+          options: ['是，已手术', '否，未手术'],
+          branches: {
+            '是，已手术': {
+              q: '是否术后满2年，且排除以下疾病或症状：高血压、心脏听诊杂音、心脏肥厚、肺动脉高压、血液残余分流或其他心脏损伤，且近1年内复查心脏超声未见异常（轻度二尖瓣、三尖瓣返流不在此范围内）？',
+              options: ['是，满足所有条件', '否，不满足'],
+              branches: {
+                '是，满足所有条件': { result: '标准体' },
+                '否，不满足': { result: '转人工核保' }
+              }
+            },
+            '否，未手术': { result: '拒保' }
+          }
+        }
+      }
+    }]
+  },
+  '瓣膜异常': {
+    questions: [{
+      q: '请问被保人的二尖瓣/三尖瓣反流情况？是否仅体检发现，从未存在心脏不适症状，从未因此就诊，且心电图检查均正常？',
+      options: ['是，仅体检发现且无症状且心电图正常', '否，有症状或心电图异常'],
+      branches: {
+        '是，仅体检发现且无症状且心电图正常': { result: '标准体' },
+        '否，有症状或心电图异常': { result: '转人工核保' }
+      }
+    }]
+  },
   '脑梗': { questions: [{ q: '被保人是否有脑梗塞/脑出血/脑血栓等脑血管疾病病史？', options: ['是', '否（误选）'], branches: { '是': { result: '拒保' }, '否（误选）': { result: null } } }] },
   '保险经历': {
     questions: [{
@@ -1240,6 +1275,32 @@ XIAOQL6_TREE['痛风'] = {
   }]
 };
 
+// 小青龙6号卵圆孔未闭差异：术后复查时间为近半年（非1年）
+XIAOQL6_TREE['卵圆孔未闭'] = {
+  questions: [{
+    q: '请问被保人的卵圆孔未闭情况？是否已自行闭合，且无其他并发症或后遗症？',
+    options: ['是，已自行闭合且无并发症', '否，未闭合'],
+    branches: {
+      '是，已自行闭合且无并发症': { result: '标准体' },
+      '否，未闭合': {
+        q: '是否已行手术治疗？',
+        options: ['是，已手术', '否，未手术'],
+        branches: {
+          '是，已手术': {
+            q: '是否术后满2年，且排除以下疾病或症状：高血压、心脏听诊杂音、心脏肥厚、肺动脉高压、血液残余分流或其他心脏损伤，且近半年内复查心脏超声未见异常（轻度二尖瓣、三尖瓣返流不在此范围内）？',
+            options: ['是，满足所有条件', '否，不满足'],
+            branches: {
+              '是，满足所有条件': { result: '标准体' },
+              '否，不满足': { result: '转人工核保' }
+            }
+          },
+          '否，未手术': { result: '拒保' }
+        }
+      }
+    }
+  }]
+};
+
 // 无敌宝宝2.0决策树（少儿重疾，结论只有标准体/除外/拒保，无加费，无转人工）
 const WUBAOBAO2_TREE = JSON.parse(JSON.stringify(CHAOMA13_TREE));
 function convertNoExtraCharge(tree) {
@@ -1333,6 +1394,32 @@ WUBAOBAO2_CONVERTED['甲状腺结节'] = {
           '3类': { result: '除外承保', detail: '除外甲状腺恶性肿瘤及其相关责任' },
           '4类及以上': { result: '拒保' },
           '无明确分类': { result: '拒保' }
+        }
+      }
+    }
+  }]
+};
+
+// 无敌宝宝2.0卵圆孔未闭差异：术后满3年（非2年），转人工→拒保
+WUBAOBAO2_CONVERTED['卵圆孔未闭'] = {
+  questions: [{
+    q: '请问被保人的卵圆孔未闭情况？是否已自行闭合，且无其他并发症或后遗症？',
+    options: ['是，已自行闭合且无并发症', '否，未闭合'],
+    branches: {
+      '是，已自行闭合且无并发症': { result: '标准体' },
+      '否，未闭合': {
+        q: '是否已行手术治疗？',
+        options: ['是，已手术', '否，未手术'],
+        branches: {
+          '是，已手术': {
+            q: '是否术后满3年，且排除以下疾病或症状：高血压、心脏听诊杂音、心脏肥厚、肺动脉高压、血液残余分流或其他心脏损伤，且近1年内复查心脏超声未见异常（轻度二尖瓣、三尖瓣返流不在此范围内）？',
+            options: ['是，满足所有条件', '否，不满足'],
+            branches: {
+              '是，满足所有条件': { result: '标准体' },
+              '否，不满足': { result: '拒保' }
+            }
+          },
+          '否，未手术': { result: '拒保' }
         }
       }
     }
@@ -1607,7 +1694,27 @@ const FUBAOMINGAI_TREE = {
   '精神疾病': { questions: [{ q: '被保人是否有精神疾病（抑郁症、焦虑症、精神分裂等）？', options: ['是', '否（误选）'], branches: { '是': { result: '拒保' }, '否（误选）': { result: null } } }] },
   '哮喘': { questions: [{ q: '被保人是否有哮喘？', options: ['是', '否（误选）'], branches: { '是': { result: '拒保' }, '否（误选）': { result: null } } }] },
   '抑郁症': { questions: [{ q: '被保人是否有抑郁症/焦虑症？', options: ['是', '否（误选）'], branches: { '是': { result: '拒保' }, '否（误选）': { result: null } } }] },
-  '前列腺增生': { questions: [{ q: '被保人是否有前列腺增生/钙化？', options: ['是', '否（误选）'], branches: { '是': { result: '拒保' }, '否（误选）': { result: null } } }] }
+  '前列腺增生': { questions: [{ q: '被保人是否有前列腺增生/钙化？', options: ['是', '否（误选）'], branches: { '是': { result: '拒保' }, '否（误选）': { result: null } } }] },
+  '卵圆孔未闭': {
+    questions: [{
+      q: '是否为卵圆孔未闭、房间隔缺损、室间隔缺损、动脉导管未闭，且满足以下所有条件：\n1、仅为单独缺损，不是两项或以上联合缺损；\n2、未手术，复查心脏超声无异常；\n3、或已手术，术后至今超过2年，近1年内心脏超声无异常，无任何不适？',
+      options: ['是，满足所有条件', '否，不满足'],
+      branches: {
+        '是，满足所有条件': { result: '标准体' },
+        '否，不满足': { result: '拒保' }
+      }
+    }]
+  },
+  '瓣膜异常': {
+    questions: [{
+      q: '是否符合如下所有条件：仅为轻微、少量或轻度的二尖瓣或三尖瓣反流；无瓣膜关闭不全、钙化、脱垂、脉瓣病变、瓣膜畸形、心房心室改变、植入起搏器、射血分数和舒张功能异常？（超声报告无相关表述视为没有）',
+      options: ['是，符合所有条件', '否，不符合'],
+      branches: {
+        '是，符合所有条件': { result: '标准体' },
+        '否，不符合': { result: '拒保' }
+      }
+    }]
+  }
 };
 
 // 海绵保宝决策树（与复保明爱守护结构相同，但有细微差异）
@@ -1706,6 +1813,13 @@ const DISEASE_PARENT_MAP = {
   '超声异常': [],
   '肿瘤标记物': [],
   '前列腺增生': ['前列腺钙化'],
+};
+
+// --- 疾病别名映射：将提取的疾病名映射到决策树中的键名 ---
+const DISEASE_ALIAS_MAP = {
+  '前列腺钙化': '前列腺增生',
+  '前列腺肥大': '前列腺增生',
+  '前列腺囊肿': '前列腺增生',
 };
 
 function extractDiseases(input) {
@@ -2064,7 +2178,7 @@ function processUserInput(text) {
 function handleProductConfirmation(text) {
   state.pendingConfirm = false;
 
-  if (text.includes('是') || text.includes('对') || text.includes('确认') || text.includes('咨询这款')) {
+  if ((text.includes('是') && !text.includes('不是') && !text.includes('是否')) || (text.includes('对') && !text.includes('不对') && !text.includes('对比')) || text.includes('确认') || text.includes('咨询这款')) {
     state.locked = true;
     state.confirmedProduct = state.lockedProduct;
     addBotMessage(
@@ -2074,6 +2188,7 @@ function handleProductConfirmation(text) {
     );
     updateStatus(`已锁定：${state.confirmedProduct.name}`);
   } else if (text.includes('不针对') || text.includes('对比') || text.includes('所有产品') || text.includes('全部')) {
+    state.lockedProduct = null;
     state.locked = false;
     state.confirmedProduct = null;
     addBotMessage(
@@ -2083,11 +2198,22 @@ function handleProductConfirmation(text) {
     );
     updateStatus('综合核保模式 · 支持五款产品对比');
   } else {
+    state.lockedProduct = null;
+    state.locked = false;
+    state.confirmedProduct = null;
     addBotMessage(
-      `<p>好的，请您输入完整的产品名称，或不针对具体产品进行核保咨询。</p>
-       <p>支持的产品：超玛13、小青龙6号、无敌宝宝2.0、复保明爱守护、海绵保宝</p>`
+      `<p>好的，请问您想咨询哪款产品？</p>
+       <p>支持的产品如下：</p>
+       <div class="quick-actions">
+         <button class="quick-btn" onclick="quickInput('我想咨询超玛13')">超玛13</button>
+         <button class="quick-btn" onclick="quickInput('我想咨询小青龙6号')">小青龙6号</button>
+         <button class="quick-btn" onclick="quickInput('我想咨询无敌宝宝2.0')">无敌宝宝2.0</button>
+         <button class="quick-btn" onclick="quickInput('我想咨询复保明爱守护')">复保明爱守护</button>
+         <button class="quick-btn" onclick="quickInput('我想咨询海绵保宝')">海绵保宝</button>
+       </div>
+       <p style="color:var(--muted);font-size:13px">或者直接描述体况，将自动进行五款产品综合核保对比。</p>`
     );
-    updateStatus('就绪 · 等待输入');
+    updateStatus('就绪 · 等待选择产品或描述体况');
   }
 }
 
@@ -2170,9 +2296,12 @@ function startDiseaseInquiry(disease) {
   state.collectedDiseases.add(disease);
   state.currentDisease = disease;
 
+  // 将疾病名映射到决策树中的键名（如 前列腺钙化 → 前列腺增生）
+  const treeDisease = DISEASE_ALIAS_MAP[disease] || disease;
+
   // 获取相关产品
   const productIds = state.locked ? [state.confirmedProduct.id] : Object.keys(PRODUCT_TREES);
-  const relevantProducts = productIds.filter(id => PRODUCT_TREES[id][disease]);
+  const relevantProducts = productIds.filter(id => PRODUCT_TREES[id][treeDisease]);
 
   if (relevantProducts.length === 0) {
     // 所有产品都没有此疾病的核保规则，默认标体
@@ -2195,9 +2324,10 @@ function startDiseaseInquiry(disease) {
   // 初始化该疾病的回答记录
   state.currentAnswers = [];
   state.currentChainIndex = 0;
+  state.questionAnswerMap = {}; // 记录已问过的问题和回答，用于跨产品复用
 
   // 获取第一个问题
-  const merged = getMergedFirstQuestion(disease);
+  const merged = getMergedFirstQuestion(treeDisease);
   if (!merged) {
     addBotMessage(`<p>无法获取 <strong>${disease}</strong> 的核保问题。</p>`);
     return;
@@ -2336,7 +2466,13 @@ function processOptionAnswer(answer) {
   state.currentAnswers.push(answer);
   state.currentChainIndex++;
 
+  // 记录当前问题和回答的映射，用于跨产品复用
+  if (state.currentQuestionNode) {
+    state.questionAnswerMap[state.currentQuestionNode.q] = answer;
+  }
+
   const disease = state.currentDisease;
+  const treeDisease = DISEASE_ALIAS_MAP[disease] || disease;
   const productIds = state.locked ? [state.confirmedProduct.id] : Object.keys(PRODUCT_TREES);
 
   // 检查各产品是否都已经有结论
@@ -2348,12 +2484,12 @@ function processOptionAnswer(answer) {
 
   for (const pid of productIds) {
     const tree = PRODUCT_TREES[pid];
-    if (!tree[disease]) continue;
+    if (!tree[treeDisease]) continue;
 
     // 如果处于deferred模式，只评估deferred产品
     if (state.deferredProductIds && !state.deferredProductIds.includes(pid)) continue;
 
-    const eval_ = evaluateProduct(pid, disease, state.currentAnswers);
+    const eval_ = evaluateProduct(pid, treeDisease, state.currentAnswers);
     results[pid] = eval_;
 
     if (eval_.result === 'DEFERRED') {
@@ -2363,7 +2499,7 @@ function processOptionAnswer(answer) {
     } else if (eval_.result === null) {
       allDone = false;
       if (!nextQuestion) {
-        const nq = getNextQuestion(tree, disease, state.currentAnswers);
+        const nq = getNextQuestion(tree, treeDisease, state.currentAnswers);
         if (nq.question) {
           nextQuestion = nq.question;
           nextQuestionProducts.push(pid);
@@ -2374,32 +2510,110 @@ function processOptionAnswer(answer) {
     }
   }
 
-  // Fix 2: 处理延迟的产品 - 为它们单独提问
+  // Fix 2: 处理延迟的产品 - 复用已回答的相同问题
   if (deferredProducts.length > 0 && !nextQuestion) {
-    // 所有需要继续问的产品都是deferred的，需要重新开始问答
-    // 保存已完成产品的结果，清空当前答案，为deferred产品重新问诊
-    state.deferredResults = { ...results }; // 保存已有结果
-    state.deferredProductIds = deferredProducts; // 记录待处理的deferred产品
-    state.currentAnswers = []; // 清空答案，重新开始
-    state.currentChainIndex = 0; // 重置轮数
+    // 保存已完成产品的结果（仅首次进入deferred模式时保存）
+    if (!state.deferredResults) {
+      state.deferredResults = { ...results };
+    }
+    // 将当前轮次已完成的产品也保存到deferredResults
+    for (const [pid, res] of Object.entries(results)) {
+      if (res && res.result !== undefined && res.result !== 'DEFERRED' && res.result !== null) {
+        state.deferredResults[pid] = res;
+      }
+    }
+    state.deferredProductIds = deferredProducts;
+    state.currentAnswers = [];
+    state.currentChainIndex = 0;
 
+    // 尝试复用已回答的问题，找到第一个需要新问的问题
     for (const pid of deferredProducts) {
       const tree = PRODUCT_TREES[pid];
-      const firstQ = tree[disease].questions[0];
-      if (firstQ && firstQ.q) {
-        nextQuestion = firstQ;
+      if (!tree[treeDisease]) continue;
+      
+      let current = tree[treeDisease].questions[0];
+      let reusedAnswers = [];
+      
+      // 遍历该产品的决策树，尝试复用已回答的问题
+      while (current && current.q) {
+        const existingAnswer = state.questionAnswerMap[current.q];
+        if (existingAnswer !== undefined) {
+          // 检查该产品的分支中是否有匹配的选项
+          let matched = false;
+          if (current.branches) {
+            // 精确匹配
+            if (current.branches[existingAnswer]) {
+              reusedAnswers.push(existingAnswer);
+              const next = current.branches[existingAnswer];
+              if (next.result !== undefined) {
+                // 直接得到结论
+                results[pid] = { result: next.result, detail: next.detail || '' };
+                matched = true;
+                break;
+              } else if (next.q) {
+                current = next;
+                matched = true;
+                continue;
+              }
+            }
+            // 模糊匹配
+            if (!matched) {
+              const normalizedAnswer = existingAnswer.replace(/\s/g, '');
+              for (const key in current.branches) {
+                const normalizedKey = key.replace(/\s/g, '');
+                if (normalizedKey === normalizedAnswer || normalizedKey.includes(normalizedAnswer) || normalizedAnswer.includes(normalizedKey)) {
+                  reusedAnswers.push(key);
+                  const next = current.branches[key];
+                  if (next.result !== undefined) {
+                    results[pid] = { result: next.result, detail: next.detail || '' };
+                    matched = true;
+                    break;
+                  } else if (next.q) {
+                    current = next;
+                    matched = true;
+                    break;
+                  }
+                }
+              }
+            }
+          }
+          if (!matched) break; // 无法复用，需要问这个问题
+        } else {
+          break; // 没有已回答的问题，需要问
+        }
+      }
+      
+      if (results[pid] && results[pid].result !== undefined && results[pid].result !== 'DEFERRED') {
+        // 该产品通过复用已有答案直接得到了结论
+        continue;
+      }
+      
+      if (current && current.q) {
+        // 找到需要新问的问题
+        state.currentAnswers = reusedAnswers;
+        state.currentChainIndex = reusedAnswers.length;
+        nextQuestion = current;
         nextQuestionProducts.push(pid);
         break;
       }
     }
-
-    // 提示用户即将为不同结构的产品重新问诊
-    const deferredNames = deferredProducts.map(id => PRODUCTS.find(p => p.id === id).name).join('、');
-    const doneNames = Object.keys(state.deferredResults).map(id => PRODUCTS.find(p => p.id === id).name).join('、');
-    addBotMessage(
-      `<p>✅ <strong>${doneNames}</strong> 已完成评估。</p>
-       <p>接下来需要为 <strong>${deferredNames}</strong> 单独问诊（这些产品的问诊方式不同）。</p>`
-    );
+    
+    if (!nextQuestion && deferredProducts.every(pid => results[pid] && results[pid].result !== undefined && results[pid].result !== 'DEFERRED')) {
+      // 所有deferred产品都通过复用得到了结论
+      allDone = true;
+    } else if (nextQuestion) {
+      const deferredNames = nextQuestionProducts.map(id => PRODUCTS.find(p => p.id === id).name).join('、');
+      const doneNames = Object.keys(state.deferredResults).filter(pid => {
+        const r = state.deferredResults[pid];
+        return r && r.result !== undefined && r.result !== 'DEFERRED';
+      }).map(id => PRODUCTS.find(p => p.id === id).name).join('、');
+      if (doneNames) {
+        addBotMessage(
+          `<p>✅ <strong>${doneNames}</strong> 已完成评估。</p>
+           <p>接下来继续为 <strong>${deferredNames}</strong> 评估。</p>`
+        );
+      }
+    }
   }
 
   if (allDone) {
